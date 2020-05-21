@@ -1,0 +1,12 @@
+[BASIC]
+
+const-naming-style=any
+variable-rgx=[a-z_][a-z0-9_]*$
+argument-rgx=[a-z_][a-z0-9_]*$
+
+[MESSAGES CONTROL]
+
+disable=
+  line-too-long,
+  logging-format-interpolation,
+  logging-fstring-interpolation,
