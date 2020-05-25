@@ -7,6 +7,7 @@ argument-rgx=[a-z_][a-z0-9_]*$
 [MESSAGES CONTROL]
 
 disable=
+  bad-continuation,
   line-too-long,
   logging-format-interpolation,
   logging-fstring-interpolation,

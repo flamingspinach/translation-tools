@@ -7,13 +7,13 @@ Uses ~/.netrc for login credentials.
 """
 
 import argparse
-import logging as log
 import os
 from typing import Any, Dict, Hashable, Iterable, Iterator, List, Optional, Set, Tuple
 
 import requests
 
 VNT_ENDPOINT = "https://legacy.vntt.app/api/v1"
+TSVTriple = Tuple[str, str, str]
 
 dry_run = False
 
@@ -88,82 +88,49 @@ def get_script_lines(file_id: int) -> List[dict]:
     return lines
 
 
-def generate_tsv_from_vnt(vnt: Iterable[dict]) -> Iterator[Tuple[str, str, str]]:
+def generate_tsv_from_vnt(vnt: Iterable[dict]) -> Iterator[TSVTriple]:
     """
     Takes JSON data from VNT for a given script file and dumps it to a list of
     triples in the format used by the local TSV files.
     """
-    for index, line in enumerate(vnt, start=1):
+    for i, line in enumerate(vnt, start=1):
         char = line["character_name"]
         orig = line["original"]
         trans = ""
         if line["translations"]:
             trans = line["translations"][0]["translation"]
+            line_number = line["line_number"] + 1
             if trans == "#":
                 raise ValueError(
-                    f"Translation at line {index} ({line['line_number']} on VNT) is the reserved string '#'"
+                    f"Translation at line {i} ({line_number} on VNT) is the reserved string '#'"
                 )
             if "\n" in trans:
-                raise ValueError(
-                    f"Translation at line {index} ({line['line_number']} on VNT) contains a newline"
-                )
-        if not trans:
-            trans = "#"
+                trans = trans.strip()
+                if "\n" in trans:
+                    raise ValueError(
+                        f"Translation at line {i} ({line_number} on VNT) contains an internal newline"
+                    )
+                print(f"Stripped newline(s) from line {i} ({line_number} on VNT)")
         yield char, orig, trans
 
 
-def dump_tsv(tsv: Iterable[Tuple[str, str, str]], filename: str):
+def dump_tsv_file(tsv: Iterable[TSVTriple], filename: str):
     """Takes a list of triples and dumps it directly to a local TSV file."""
-    if dry_run:
-        log.info(f"        Would have dumped the following lines to '{filename}':")
-        filename = "/dev/stdout"
+
+    # if dry_run:
+    #     print(f"        Would have dumped the following lines to '{filename}':")
+    #     filename = "/dev/stdout"
     with open(filename, "w") as f:
         for char, orig, trans in tsv:
-            f.write(f"{char}\t{orig}\t{trans}\n")
+            if trans == "":
+                trans = "#"
+            print("\t".join((char, orig, trans)), file=f)
 
 
-def sync_tsv_with_vnt(tsv: List[Tuple[str, str, str]], vnt: List[dict]):
+def submit_updates(updates: List[Tuple[int, str]]):
     """
-    Compares triples from a TSV and JSON objects from a VNT script file, line
-    by line, to see if there are any updates that need to be made, i.e. new
-    translations locally that need to be uploaded to VNT or new translations on
-    VNT that need to be downloaded into the TSV file.
-
-    When translations differ between local and remote, if the local translation
-    is novel (doesn't exist in the history on VNT) we use it, and if it is not
-    novel (does exist in the history on VNT), we ask the user whether to use it
-    or overwrite it with the one from VNT.
-
-    Also, we first check to make sure that the TSV and the VNT script have
-    exactly the same original Japanese.
-
-    If not, we make the user fix the TSV file manually instead of trying to do
-    anything too clever.  A TSV dump of the VNT script is saved locally for
-    reference.
-    """
-    vnt_triples = list(generate_tsv_from_vnt(vnt))
-    if len(tsv) != len(vnt_triples):
-        raise ValueError(
-            f"Different number of lines in TSV file ({len(tsv)}) and "
-            f"VNT script ({len(vnt_triples)}), please reconcile and rerun"
-        )
-    for i, ((char, orig, _), line) in enumerate(zip(tsv, vnt), start=1):
-        if char != line["character_name"] or orig != line["original"]:
-            raise ValueError(
-                f"VNT script and TSV file differ in original text at line {i}:\n"
-                f"  VNT: char={line['character_name']}, orig={line['original']}\n"
-                f"  TSV: char={char}, orig={orig}"
-            )
-
-
-def submit_translations(translations: List[Tuple[int, str]]):
-    """
-    Submit translations found locally that weren't equal to the current
-    translation on VNT if any.
-
-    Of these, if a translation was found to be in VNT's history for that line
-    despite not being the current translation, we prompt the user for
-    confirmation that they want to rollback to an earlier translation.
+    Submits updates, i.e. translations found locally that weren't equal to the
+    current translation on VNT if any.
     """
 
     def chunks(l: List, size: int):
@@ -171,11 +138,11 @@ def submit_translations(translations: List[Tuple[int, str]]):
             yield l[:size]
             l = l[size:]
 
-    for chunk in chunks(translations, 25):
+    for chunk in chunks(updates, 25):
         if dry_run:
-            log.info("        The following lines would have been uploaded:")
+            print("        The following lines would have been uploaded:")
             for (line_id, trans) in chunk:
-                log.info(f"{line_id}: {trans}")
+                print(f"{line_id}: {trans}")
             continue
         payload = [
             {"line": {"id": line_id}, "translation": trans, "language": {"code": "en"}}
@@ -185,7 +152,7 @@ def submit_translations(translations: List[Tuple[int, str]]):
         res.raise_for_status()
 
 
-def load_tsv_file(filename: str) -> Iterator[Tuple[str, str, str]]:
+def load_tsv_file(filename: str) -> Iterator[TSVTriple]:
     """
     Read a list of triples from a local TSV file.  Each triple is of the form
     (char, orig, trans) where char is the character for dialogue lines else '',
@@ -194,11 +161,91 @@ def load_tsv_file(filename: str) -> Iterator[Tuple[str, str, str]]:
     """
     with open(filename, "r") as f:
         for line in f:
-            char, orig, trans = line.split("\t")
+            char, orig, trans = line.rstrip("\n").split("\t")
+            if trans == "#":
+                trans = ""
             yield char, orig, trans
 
 
-def sync_project(codename: str, directory: str = "."):
+def compare_lines(
+    tsv_lines: List[TSVTriple], vnt_triples: Iterable[TSVTriple], vnt_lines: List[dict]
+) -> Tuple[List[TSVTriple], List[Tuple[int, str]]]:
+    """
+    Compares triples from a TSV and JSON objects from a VNT script file, line
+    by line, to see if there are any updates that need to be made, i.e. new
+    translations locally that need to be uploaded to VNT or new translations on
+    VNT that need to be downloaded into the TSV file.
+
+    When translations differ between local and VNT, we push the local
+    translation to VNT.  But if there are any cases where a local translation
+    is equal to an old translation in the VNT history, we pause to let the user
+    abort, to avoid overwriting someone else's work.
+
+    Also, we first check to make sure that the TSV and the VNT script have
+    exactly the same original Japanese.  If not, we make the user fix the TSV
+    file manually instead of trying to do anything too clever.  A TSV dump of
+    the VNT script is saved locally for reference.
+    """
+    # pylint: disable=too-many-locals
+
+    if len(tsv_lines) != len(vnt_lines):
+        raise ValueError(
+            f"Different number of lines in TSV file ({len(tsv_lines)}) and "
+            f"VNT script ({len(vnt_lines)}); please reconcile and rerun"
+        )
+
+    rollback_messages = []
+    updates = []
+    tsv_lines_new = []
+    for i, ((char0, orig0, trans0), (char1, orig1, trans1), line) in enumerate(
+        zip(tsv_lines, vnt_triples, vnt_lines)
+    ):
+        if char0 != char1 or orig0 != orig1:
+            raise ValueError(
+                f"TSV file and VNT script differ in original text at line {i+1}:\n"
+                f"  TSV: char={char0}, orig={orig0}\n"
+                f"  VNT: char={char1}, orig={orig1}"
+            )
+        if not trans0:
+            # Local has no translation, so set it from VNT
+            trans0 = trans1
+        elif trans0 != trans1:
+            # Local has a translation and VNT has a different one or none, so
+            # set VNT's to what we have.
+            # print(f"local={repr(trans0)}, remote={repr(trans1)}")
+            updates.append((line["id"], trans0))
+            # But if what we have is in the past history on VNT, then what's on
+            # VNT may be newer than what we have, so confirm with the user
+            # before sending the updates later.
+            if trans0 in (x["translation"] for x in line["translations"]):
+                rollback_messages.append(
+                    f"Line {i+1} ({line['line_number']+1}): "
+                    f"char={repr(char0)}, orig={repr(orig0)}, "
+                    f"local-translation={repr(trans0)}, "
+                    f"current-vnt-translation={repr(trans1)}"
+                )
+        tsv_lines_new.append((char0, orig0, trans0))
+
+    if rollback_messages:
+        print(
+            f"WARNING: {len(rollback_messages)} translations found locally appear to equal "
+            f"older entries in the history on VNT.  You may be reverting someone else's changes. "
+            f"What should we do?"
+        )
+        while True:
+            action = input("Type 'abort', 'print', or 'proceed': ")
+            if action == "abort":
+                raise Exception("Operation aborted")
+            if action == "print":
+                for message in rollback_messages:
+                    print(message)
+            if action == "proceed":
+                break
+
+    return tsv_lines_new, updates
+
+
+def sync_project(codename: str, directory: str):
     """
     Given a project, download all its script files from VNT into the current
     directory as TSV files.  If any of the target TSV files already exist,
@@ -208,21 +255,66 @@ def sync_project(codename: str, directory: str = "."):
     os.chdir(directory)
     project_id = get_project_id(codename)
     scripts = get_project_scripts(project_id)
+
+    all_updates: List[Tuple[int, str]] = []
     for script in scripts:
-        vnt_filename = script['original_filename']
+        vnt_filename = script["original_filename"]
         tsv_filename = os.path.splitext(vnt_filename)[0] + ".tsv"
-        log.info(f"Syncing '{vnt_filename}' on VNT to '{tsv_filename}' on disk")
-        vnt_lines = get_script_lines(script["id"])
-        if not os.path.exists(tsv_filename):
-            dump_tsv(generate_tsv_from_vnt(vnt_lines), tsv_filename)
+        if script['line_count'] == '0':
+            print(f"---x Skipping {vnt_filename} on VNT because it is empty.")
             continue
-        raise IOError("oops")
+        print(f"--- Syncing {vnt_filename} on VNT to {tsv_filename} on disk.")
+
+        vnt_lines = get_script_lines(script["id"])
+        vnt_triples = list(generate_tsv_from_vnt(vnt_lines))
+        if not os.path.exists(tsv_filename):
+            print(f"Initial download of {tsv_filename}.")
+            dump_tsv_file(vnt_triples, tsv_filename)
+            continue
+        tsv_lines = list(load_tsv_file(tsv_filename))
+
+        # raise IOError("oops")
+
+        try:
+            tsv_lines_new, updates = compare_lines(tsv_lines, vnt_triples, vnt_lines)
+        except:
+            tsv_filename = tsv_filename + ".1"
+            print(f"Dumping VNT script {vnt_filename} to {tsv_filename}.")
+            dump_tsv_file(vnt_triples, tsv_filename)
+            raise
+
+        num_local_updates = sum(
+            1 for (_, _, a), (_, _, b) in zip(tsv_lines, tsv_lines_new) if a != b
+        )
+        print(f"Updating {num_local_updates} translations in {tsv_filename}.")
+        if num_local_updates > 0:
+            dump_tsv_file(tsv_lines_new, tsv_filename)
+
+        print(f"Queueing {len(updates)} translations to upload from {tsv_filename}.")
+        all_updates += updates
+
+    print("Submitting updates, please confirm.")
+    action = input("Type yes/no: ")
+    if action == 'yes':
+        print("Uploading updates to VNT...")
+        submit_updates(all_updates)
+        print("Done.")
+    else:
+        print("Aborting.")
 
 
 def main():
     """Entrypoint"""
     parser = argparse.ArgumentParser()
-    parser.add_argument()
+    parser.add_argument(
+        "project_name", help="Codename for the project on VNT. Seen in the UI URLs."
+    )
+    parser.add_argument(
+        "--directory", default=".", help="Directory to store the TSV file."
+    )
+    args = parser.parse_args()
+
+    sync_project(args.project_name, args.directory)
 
 
 if __name__ == "__main__":
