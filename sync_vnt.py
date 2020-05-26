@@ -9,7 +9,7 @@ Uses ~/.netrc for login credentials.
 import argparse
 import json
 import os
-from typing import Any, Dict, Hashable, Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Any, Dict, Hashable, Iterable, Iterator, List, Set, Tuple
 
 import requests
 from progressbar import progressbar  # type: ignore
@@ -22,7 +22,7 @@ UPLOAD_CHUNK_SIZE = 25
 dry_run = False
 
 
-def find_a_duplicate(xs: Iterable) -> Optional[Tuple[Hashable, int]]:
+def find_a_duplicate(xs: Iterable[Hashable]) -> bool:
     """
     Check whether an iterator contains multiple copies of the same element.
     The element type must be hashable.
@@ -30,9 +30,9 @@ def find_a_duplicate(xs: Iterable) -> Optional[Tuple[Hashable, int]]:
     seen: Set[Hashable] = set()
     for x in xs:
         if x in seen:
-            return x
+            return True
         seen.add(x)
-    return None
+    return False
 
 
 def get_project_id(codename: str) -> int:
