@@ -7,10 +7,12 @@ Uses ~/.netrc for login credentials.
 """
 
 import argparse
+import json
 import os
 from typing import Any, Dict, Hashable, Iterable, Iterator, List, Optional, Set, Tuple
 
 import requests
+from progressbar import progressbar  # type: ignore
 
 TSVTriple = Tuple[str, str, str]
 
@@ -151,17 +153,50 @@ def compare_lines(
     translations locally that need to be uploaded to VNT or new translations on
     VNT that need to be downloaded into the TSV file.
 
-    When translations differ between local and VNT, we push the local
-    translation to VNT.  But if there are any cases where a local translation
-    is equal to an old translation in the VNT history, we pause to let the user
-    abort, to avoid overwriting someone else's work.
+    - If both sides have identical translations, we do nothing.
+
+    - When there is no local translation, we download VNT's translation.
+
+    - When there is no VNT translation, we upload our local translation.
+
+    - If the two sides have differing translations and the local one is present
+      in VNT's history list, we download VNT's translation (i.e. we presume the
+      local one is outdated).
+
+      * NOTE: To make sure you don't lose any local changes, make sure to
+        commit your local files before running this script.
+
+    - If the two sides have differing translations and the local one is not
+      present in VNT's history list, we upload the local translation (i.e. we
+      presume the VNT one is outdated).
+
+      * NOTE: To make sure you don't clobber any remote changes, you'll have to
+        do some manual version control stuff (though the script will prompt you
+        before continuing if this case is ever encountered).  Namely:
+
+        1. Before running this script, commit your changes and then check out
+           an old commit from the last time you ran the script.
+
+        2. Run the script, which will download anything that appeared on VNT
+           since you last ran the script.
+
+        3. Commit any changes that were made by the script onto a new branch.
+
+        4. Merge the branch into your master branch.
+
+        5. Run the script again to sync the merged changes to VNT.
+
+        TODO: Do the above automatically in this script by calling out to git.
+
+        Of course, if you're the only person working on this project on VNT,
+        probably don't bother with all this, since you know what you're doing.
 
     Also, we first check to make sure that the TSV and the VNT script have
     exactly the same original Japanese.  If not, we make the user fix the TSV
     file manually instead of trying to do anything too clever.  A TSV dump of
     the VNT script is saved locally for reference.
     """
-    # pylint: disable=too-many-locals
+    # pylint: disable=too-many-locals, too-many-branches
 
     if len(tsv_lines) != len(vnt_lines):
         raise ValueError(
@@ -169,7 +204,7 @@ def compare_lines(
             f"VNT script ({len(vnt_lines)}); please reconcile and rerun"
         )
 
-    rollback_messages = []
+    overwrite_info = []
     updates = []
     tsv_lines_new = []
     for i, ((char0, orig0, trans0), (char1, orig1, trans1), line) in enumerate(
@@ -181,39 +216,43 @@ def compare_lines(
                 f"  TSV: char={char0}, orig={orig0}\n"
                 f"  VNT: char={char1}, orig={orig1}"
             )
-        if not trans0:
-            # Local has no translation, so set it from VNT
+        if trans0 == trans1:
+            pass
+        elif not trans0 or trans0 in (x["translation"] for x in line["translations"]):
             trans0 = trans1
-        elif trans0 != trans1:
-            # Local has a translation and VNT has a different one or none, so
-            # set VNT's to what we have.
-            # print(f"local={repr(trans0)}, remote={repr(trans1)}")
+        else:
             updates.append((line["id"], trans0))
-            # But if what we have is in the past history on VNT, then what's on
-            # VNT may be newer than what we have, so confirm with the user
-            # before sending the updates later.
-            if trans0 in (x["translation"] for x in line["translations"]):
-                rollback_messages.append(
-                    f"Line {i+1} ({line['line_number']+1}): "
-                    f"char={repr(char0)}, orig={repr(orig0)}, "
-                    f"local-translation={repr(trans0)}, "
-                    f"current-vnt-translation={repr(trans1)}"
+            if trans1:
+                author = line["translations"][0]["created_by"]["username"]
+                overwrite_info.append(
+                    {
+                        "line": i + 1,
+                        "line_no": line["line_number"] + 1,
+                        "char": char0,
+                        "orig": orig0,
+                        "local": trans0,
+                        "vnt": trans1,
+                        "vnt-author": author,
+                    }
                 )
         tsv_lines_new.append((char0, orig0, trans0))
 
-    if rollback_messages:
+    if overwrite_info:
         print(
-            f"WARNING: {len(rollback_messages)} translations found locally appear to equal "
-            f"older entries in the history on VNT.  You may be reverting someone else's changes. "
-            f"What should we do?"
+            f"WARNING: In {len(overwrite_info)} cases, found a local translation neither matching "
+            f"VNT's translation nor existing in VNT's history.  We assume these translations are "
+            f"novel and will upload them to VNT, but this will overwrite the corresponding "
+            f"translations on VNT.  What should we do?"
         )
         while True:
             action = input("Type 'abort', 'print', or 'proceed': ")
             if action == "abort":
                 raise Exception("Operation aborted")
             if action == "print":
-                for message in rollback_messages:
-                    print(message)
+                # You can use `jq` or something with `xclip` to comb this
+                # output to make sure you're only clobbering your own stuff
+                for info in overwrite_info:
+                    print(json.dumps(info, ensure_ascii=False))
             if action == "proceed":
                 break
 
@@ -231,7 +270,7 @@ def submit_updates(updates: List[Tuple[int, str]]):
             yield l[:size]
             l = l[size:]
 
-    for chunk in chunks(updates, UPLOAD_CHUNK_SIZE):
+    for chunk in progressbar(list(chunks(updates, UPLOAD_CHUNK_SIZE))):
         if dry_run:
             print("        The following lines would have been uploaded:")
             for (line_id, trans) in chunk:
@@ -293,7 +332,11 @@ def sync_project(codename: str, directory: str):
         print(f"Queueing {len(updates)} translations to upload from {tsv_filename}.")
         all_updates += updates
 
-    print("Submitting {len(all_updates)} updates, please confirm.")
+    if not all_updates:
+        print("Nothing to upload; done.")
+        return
+
+    print(f"Submitting {len(all_updates)} updates, please confirm.")
     action = None
     while action not in {"yes", "no"}:
         action = input("Type yes/no: ")

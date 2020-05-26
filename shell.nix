@@ -1,6 +1,7 @@
 { pkgs ? import <nixpkgs> {} }:
 with pkgs; let
   my-python-packages = python-packages: with python-packages; ([
+    progressbar2
     requests
   ] ++ [
     # standard dev stuff
