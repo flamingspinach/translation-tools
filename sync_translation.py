@@ -12,8 +12,10 @@ from typing import Any, Dict, Hashable, Iterable, Iterator, List, Optional, Set,
 
 import requests
 
-VNT_ENDPOINT = "https://legacy.vntt.app/api/v1"
 TSVTriple = Tuple[str, str, str]
+
+VNT_ENDPOINT = "https://legacy.vntt.app/api/v1"
+UPLOAD_CHUNK_SIZE = 25
 
 dry_run = False
 
@@ -104,52 +106,25 @@ def generate_tsv_from_vnt(vnt: Iterable[dict]) -> Iterator[TSVTriple]:
                 raise ValueError(
                     f"Translation at line {i} ({line_number} on VNT) is the reserved string '#'"
                 )
-            if "\n" in trans:
-                trans = trans.strip()
-                if "\n" in trans:
-                    raise ValueError(
-                        f"Translation at line {i} ({line_number} on VNT) contains an internal newline"
-                    )
-                print(f"Stripped newline(s) from line {i} ({line_number} on VNT)")
+        if "\n" in orig.strip("\n") or "\n" in trans.strip("\n"):
+            raise ValueError(
+                f"Original or translated text at line {i} ({line_number} on VNT) contains an internal newline"
+            )
+        if orig.strip("\n") != orig or trans.strip("\n") != trans:
+            print(
+                # actually only strip if/when this is eventually written to a file
+                f"WARNING: stripping leading or trailing newline(s) from original and/or translated text at line {i} ({line_number} on VNT)"
+            )
         yield char, orig, trans
 
 
 def dump_tsv_file(tsv: Iterable[TSVTriple], filename: str):
     """Takes a list of triples and dumps it directly to a local TSV file."""
-
-    # if dry_run:
-    #     print(f"        Would have dumped the following lines to '{filename}':")
-    #     filename = "/dev/stdout"
     with open(filename, "w") as f:
         for char, orig, trans in tsv:
             if trans == "":
                 trans = "#"
-            print("\t".join((char, orig, trans)), file=f)
-
-
-def submit_updates(updates: List[Tuple[int, str]]):
-    """
-    Submits updates, i.e. translations found locally that weren't equal to the
-    current translation on VNT if any.
-    """
-
-    def chunks(l: List, size: int):
-        while l:
-            yield l[:size]
-            l = l[size:]
-
-    for chunk in chunks(updates, 25):
-        if dry_run:
-            print("        The following lines would have been uploaded:")
-            for (line_id, trans) in chunk:
-                print(f"{line_id}: {trans}")
-            continue
-        payload = [
-            {"line": {"id": line_id}, "translation": trans, "language": {"code": "en"}}
-            for line_id, trans in chunk
-        ]
-        res = requests.post(f"{VNT_ENDPOINT}/translations.json", json=payload)
-        res.raise_for_status()
+            print("\t".join((char, orig.strip("\n"), trans.strip("\n"))), file=f)
 
 
 def load_tsv_file(filename: str) -> Iterator[TSVTriple]:
@@ -245,6 +220,31 @@ def compare_lines(
     return tsv_lines_new, updates
 
 
+def submit_updates(updates: List[Tuple[int, str]]):
+    """
+    Submits updates, i.e. translations found locally that weren't equal to the
+    current translation on VNT if any.
+    """
+
+    def chunks(l: List, size: int):
+        while l:
+            yield l[:size]
+            l = l[size:]
+
+    for chunk in chunks(updates, UPLOAD_CHUNK_SIZE):
+        if dry_run:
+            print("        The following lines would have been uploaded:")
+            for (line_id, trans) in chunk:
+                print(f"{line_id}: {trans}")
+            continue
+        payload = [
+            {"line": {"id": line_id}, "translation": trans, "language": {"code": "en"}}
+            for line_id, trans in chunk
+        ]
+        res = requests.post(f"{VNT_ENDPOINT}/translations.json", json=payload)
+        res.raise_for_status()
+
+
 def sync_project(codename: str, directory: str):
     """
     Given a project, download all its script files from VNT into the current
@@ -260,7 +260,7 @@ def sync_project(codename: str, directory: str):
     for script in scripts:
         vnt_filename = script["original_filename"]
         tsv_filename = os.path.splitext(vnt_filename)[0] + ".tsv"
-        if script['line_count'] == '0':
+        if script["line_count"] == 0:
             print(f"---x Skipping {vnt_filename} on VNT because it is empty.")
             continue
         print(f"--- Syncing {vnt_filename} on VNT to {tsv_filename} on disk.")
@@ -293,10 +293,12 @@ def sync_project(codename: str, directory: str):
         print(f"Queueing {len(updates)} translations to upload from {tsv_filename}.")
         all_updates += updates
 
-    print("Submitting updates, please confirm.")
-    action = input("Type yes/no: ")
-    if action == 'yes':
-        print("Uploading updates to VNT...")
+    print("Submitting {len(all_updates)} updates, please confirm.")
+    action = None
+    while action not in {"yes", "no"}:
+        action = input("Type yes/no: ")
+    if action == "yes":
+        print(f"Uploading {len(all_updates)} updated translations to VNT...")
         submit_updates(all_updates)
         print("Done.")
     else:
