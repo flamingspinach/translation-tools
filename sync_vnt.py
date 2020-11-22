@@ -19,7 +19,7 @@ TSVTriple = Tuple[str, str, str]
 VNT_ENDPOINT = "https://legacy.vntt.app/api/v1"
 UPLOAD_CHUNK_SIZE = 25
 
-dry_run = False
+global_dry_run = False
 
 
 def find_a_duplicate(xs: Iterable[Hashable]) -> bool:
@@ -106,7 +106,7 @@ def generate_tsv_from_vnt(vnt: Iterable[dict]) -> Iterator[TSVTriple]:
             line_number = line["line_number"] + 1
             if trans == "#":
                 raise ValueError(
-                    f"Translation at line {i} ({line_number} on VNT) is the reserved string '#'"
+                    f"Translation at line {i} ({line_number} on VNT) is the reserved string '#'. Please manually change it to something else on VNT before running this script."
                 )
         if "\n" in orig.strip("\n") or "\n" in trans.strip("\n"):
             raise ValueError(
@@ -245,21 +245,23 @@ def compare_lines(
             f"translations on VNT.  What should we do?"
         )
         while True:
-            action = input("Type 'abort', 'print', or 'proceed': ")
+            action = input("Type 'abort', 'print', 'skip' (i.e. don't upload), or 'proceed' (i.e. upload): ")
             if action == "abort":
                 raise Exception("Operation aborted")
             if action == "print":
                 # You can use `jq` or something with `xclip` to comb this
                 # output to make sure you're only clobbering your own stuff
                 for info in overwrite_info:
-                    print(json.dumps(info, ensure_ascii=False))
+                    print(json.dumps(info, ensure_ascii=False, indent=2))
+            if action == "skip":
+                return tsv_lines_new, []
             if action == "proceed":
                 break
 
     return tsv_lines_new, updates
 
 
-def submit_updates(updates: List[Tuple[int, str]]):
+def submit_updates(updates: List[Tuple[int, str]], dry_run: bool = False):
     """
     Submits updates, i.e. translations found locally that weren't equal to the
     current translation on VNT if any.
@@ -271,7 +273,7 @@ def submit_updates(updates: List[Tuple[int, str]]):
             l = l[size:]
 
     for chunk in progressbar(list(chunks(updates, UPLOAD_CHUNK_SIZE))):
-        if dry_run:
+        if dry_run or global_dry_run:
             print("        The following lines would have been uploaded:")
             for (line_id, trans) in chunk:
                 print(f"{line_id}: {trans}")
@@ -338,14 +340,21 @@ def sync_project(codename: str, directory: str):
 
     print(f"Submitting {len(all_updates)} updates, please confirm.")
     action = None
-    while action not in {"yes", "no"}:
-        action = input("Type yes/no: ")
-    if action == "yes":
-        print(f"Uploading {len(all_updates)} updated translations to VNT...")
-        submit_updates(all_updates)
-        print("Done.")
-    else:
-        print("Aborting.")
+    while True:
+        action = input("Type yes/no/print: ")
+        if action == "yes":
+            print(f"Uploading {len(all_updates)} updated translations to VNT...")
+            submit_updates(all_updates)
+            print("Done.")
+            break
+        if action == "no":
+            print(f"Exiting.")
+            break
+        if action == 'print':
+            print(f"Printing {len(all_updates)} updated translations queued for submission...")
+            submit_updates(all_updates, dry_run=True)
+        else:
+            print(f"Invalid selection: {action}")
 
 
 def main():
@@ -357,7 +366,15 @@ def main():
     parser.add_argument(
         "--directory", default=".", help="Directory to store the TSV file."
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Never upload anything to VNT (but still download things).",
+    )
     args = parser.parse_args()
+    if args.dry_run:
+        print("NOTE: Dry run.")
+        global_dry_run = True
 
     sync_project(args.project_name, args.directory)
 
