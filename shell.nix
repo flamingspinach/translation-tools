@@ -3,6 +3,7 @@ with pkgs; let
   my-python-packages = python-packages: with python-packages; ([
     progressbar2
     requests
+    unidiff
   ] ++ [
     # standard dev stuff
     #jedi json-rpc service_factory # anaconda-mode deps
