@@ -20,6 +20,7 @@ VNT_ENDPOINT = "https://legacy.vntt.app/api/v1"
 UPLOAD_CHUNK_SIZE = 25
 
 global_dry_run = False
+global_force = False
 
 
 def find_a_duplicate(xs: Iterable[Hashable]) -> bool:
@@ -237,7 +238,7 @@ def compare_lines(
                 )
         tsv_lines_new.append((char0, orig0, trans0))
 
-    if overwrite_info:
+    if overwrite_info and not global_force:
         print(
             f"WARNING: In {len(overwrite_info)} cases, found a local translation neither matching "
             f"VNT's translation nor existing in VNT's history.  We assume these translations are "
@@ -371,10 +372,19 @@ def main():
         action="store_true",
         help="Never upload anything to VNT (but still download things).",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Don't prompt per file upon changes detected."
+    )
     args = parser.parse_args()
     if args.dry_run:
         print("NOTE: Dry run.")
         global_dry_run = True
+
+    if args.force:
+        print("WARNING: Not prompting per file when changes detected.")
+        global_force = True
 
     sync_project(args.project_name, args.directory)
 
