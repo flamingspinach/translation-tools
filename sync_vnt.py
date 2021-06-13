@@ -19,9 +19,6 @@ TSVTriple = Tuple[str, str, str]
 VNT_ENDPOINT = "https://legacy.vntt.app/api/v1"
 UPLOAD_CHUNK_SIZE = 25
 
-global_dry_run = False
-global_force = False
-
 
 def find_a_duplicate(xs: Iterable[Hashable]) -> bool:
     """
@@ -238,7 +235,7 @@ def compare_lines(
                 )
         tsv_lines_new.append((char0, orig0, trans0))
 
-    if overwrite_info and not global_force:
+    if overwrite_info and not args.force:
         print(
             f"WARNING: In {len(overwrite_info)} cases, found a local translation neither matching "
             f"VNT's translation nor existing in VNT's history.  We assume these translations are "
@@ -274,7 +271,7 @@ def submit_updates(updates: List[Tuple[int, str]], dry_run: bool = False):
             l = l[size:]
 
     for chunk in progressbar(list(chunks(updates, UPLOAD_CHUNK_SIZE))):
-        if dry_run or global_dry_run:
+        if dry_run or args.dry_run:
             print("        The following lines would have been uploaded:")
             for (line_id, trans) in chunk:
                 print(f"{line_id}: {trans}")
@@ -321,7 +318,7 @@ def sync_project(codename: str, directory: str):
             tsv_lines_new, updates = compare_lines(tsv_lines, vnt_triples, vnt_lines)
         except:
             tsv_filename = tsv_filename + ".1"
-            print(f"Dumping VNT script {vnt_filename} to {tsv_filename}.")
+            print(f"\nDumping VNT script {vnt_filename} to {tsv_filename}.")
             dump_tsv_file(vnt_triples, tsv_filename)
             raise
 
@@ -362,7 +359,8 @@ def main():
     """Entrypoint"""
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "project_name", help="Codename for the project on VNT. Seen in the UI URLs."
+        "project_name",
+        help="Codename for the project on VNT. Seen in the UI URLs."
     )
     parser.add_argument(
         "--directory", default=".", help="Directory to store the TSV file."
@@ -377,14 +375,13 @@ def main():
         action="store_true",
         help="Don't prompt per file upon changes detected."
     )
+    global args
     args = parser.parse_args()
     if args.dry_run:
         print("NOTE: Dry run.")
-        global_dry_run = True
 
     if args.force:
         print("WARNING: Not prompting per file when changes detected.")
-        global_force = True
 
     sync_project(args.project_name, args.directory)
 
